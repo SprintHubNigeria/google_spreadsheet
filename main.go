@@ -25,89 +25,37 @@ import (
 	"google.golang.org/api/sheets/v4"
 )
 
+const readRange = "Sheet1!A3:F"
+
 var (
 	enableSandboxMode bool
 	sendGridAPIKey    string
 	spreadsheetID     string
 	// ErrMissingEnvVar will be raised when required environment variables are missing
 	ErrMissingEnvVar = errors.New("Missing environment variable")
+	srv              *sheets.Service
+	emailTemplate    *template.Template
+	mailClient       *sendgrid.Client
 )
 
-func main() {
-	clientSecret, err := ioutil.ReadFile("client_secret.json")
-	if err != nil {
-		log.Fatalf("Unable to read client secret file: %v", err)
+func init() {
+	srv = newSheetsService("client_secret.json")
+	if srv == nil {
+		log.Fatalln("Sheets service configuration failed")
 	}
-
-	// If modifying these scopes, delete your previously saved client_secret.json.
-	config, err := google.ConfigFromJSON(clientSecret, sheets.SpreadsheetsReadonlyScope)
-	if err != nil {
-		log.Fatalf("Unable to parse client secret file to config: %v", err)
-	}
-	client := getClient(config)
-
-	srv, err := sheets.New(client)
-	if err != nil {
-		log.Fatalf("Unable to retrieve Sheets client: %v", err)
-	}
-
-	if err = setupEnvVars(map[string]*string{
+	if err := setupEnvVars(map[string]*string{
 		"SENDGRID_API_KEY": &sendGridAPIKey,
 		"SPREADSHEET_ID":   &spreadsheetID,
 	}); err != nil {
 		log.Fatalln(err)
 	}
-
-	mailClient := sendgrid.NewSendClient(sendGridAPIKey)
-	readRange := "Sheet1!A3:F"
-	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
-	if err != nil {
-		log.Fatalf("Unable to retrieve data from sheet: %v", errors.WithStack(err))
-	}
-
 	// Email template for the message
-	emailTemplate := template.Must(template.ParseFiles("email-template.html"))
+	emailTemplate = template.Must(template.ParseFiles("email-template.html"))
+	mailClient = sendgrid.NewSendClient(sendGridAPIKey)
+}
 
-	if len(resp.Values) == 0 {
-		fmt.Println("No data found.")
-	} else {
-		for _, row := range resp.Values {
-			// Parse the data from the spreadsheet and clean them for use
-			data, err := newSheetEntry(row)
-			if err != nil {
-				log.Println(errors.WithMessage(err, "Failed to parse data from spreadsheet."))
-			}
-			// Determine whether there's between 0 and 24 hours left
-			now := time.Now().UTC()
-			if timeLeft := data.endDate.Sub(now); timeLeft.Hours() < 24 {
-				// Send email notification
-				from := mail.NewEmail("SprintHub", "noreply@sprinthub.com.ng")
-				to := mail.NewEmail(data.firstName, "jthankgod@ymail.com")
-				subject := "Co-working Space Subscription Expiry"
-				messageText := "Your SprintHub co-working space subscription will expire in" + string(int(timeLeft.Hours())) + "hours."
-				msgBytes := bytes.NewBuffer([]byte{})
-				err := emailTemplate.Execute(msgBytes, emailData{
-					FirstName: data.firstName,
-					TimeLeft:  string(int(timeLeft.Hours())) + "hours",
-				})
-				if err != nil {
-					log.Println(errors.WithMessage(err, "Cannot execute HTML template."))
-					continue
-				}
-				message := mail.NewSingleEmail(from, subject, to, messageText, msgBytes.String())
-				// message.SetMailSettings(&mail.MailSettings{
-				// 	SandboxMode: &mail.Setting{
-				// 		Enable: &enableSandboxMode,
-				// 	},
-				// })
-				response, err := mailClient.Send(message)
-				if err != nil {
-					log.Println(errors.WithMessage(err, "Message sending failed."))
-				}
-				log.Println(response)
-			}
-		}
-	}
+func main() {
+
 }
 
 type emailData struct {
@@ -234,4 +182,75 @@ func setupEnvVars(vars map[string]*string) error {
 		}
 	}
 	return nil
+}
+
+func newSheetsService(secretsFile string) *sheets.Service {
+	clientSecret, err := ioutil.ReadFile("client_secret.json")
+	if err != nil {
+		log.Printf("Unable to read client secret file: %v", err)
+		return nil
+	}
+
+	// If modifying these scopes, delete your previously saved client_secret.json.
+	config, err := google.ConfigFromJSON(clientSecret, sheets.SpreadsheetsReadonlyScope)
+	if err != nil {
+		log.Printf("Unable to parse client secret file to config: %v", err)
+		return nil
+	}
+	client := getClient(config)
+
+	srv, err := sheets.New(client)
+	if err != nil {
+		log.Printf("Unable to retrieve Sheets client: %v", err)
+		return nil
+	}
+	return srv
+}
+
+func handleMailPing(w http.ResponseWriter, r *http.Request) {
+	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	if len(resp.Values) == 0 {
+		http.Error(w, errors.New("Missing sheets data").Error(), http.StatusInternalServerError)
+	} else {
+		for _, row := range resp.Values {
+			// Parse the data from the spreadsheet and clean them for use
+			data, err := newSheetEntry(row)
+			if err != nil {
+				log.Println(errors.WithMessage(err, "Failed to parse data from spreadsheet."))
+				continue
+			}
+			// Determine whether there's between 0 and 24 hours left
+			now := time.Now().UTC()
+			if timeLeft := data.endDate.Sub(now); timeLeft.Hours() < 24 {
+				// Send email notification
+				from := mail.NewEmail("SprintHub", "noreply@sprinthub.com.ng")
+				to := mail.NewEmail(data.firstName, "jthankgod@ymail.com")
+				subject := "Co-working Space Subscription Expiry"
+				messageText := "Your SprintHub co-working space subscription will expire in" + strconv.Itoa(int(timeLeft.Hours())) + "hours."
+				msgBytes := bytes.NewBuffer([]byte{})
+				err := emailTemplate.Execute(msgBytes, emailData{
+					FirstName: data.firstName,
+					TimeLeft:  strconv.Itoa(int(timeLeft.Hours())) + "hours",
+				})
+				if err != nil {
+					log.Println(errors.WithMessage(err, "Cannot execute HTML template."))
+					continue
+				}
+				message := mail.NewSingleEmail(from, subject, to, messageText, msgBytes.String())
+				// message.SetMailSettings(&mail.MailSettings{
+				// 	SandboxMode: &mail.Setting{
+				// 		Enable: &enableSandboxMode,
+				// 	},
+				// })
+				response, err := mailClient.Send(message)
+				if err != nil {
+					log.Println(errors.WithMessage(err, "Message sending failed."))
+				}
+				log.Println(response)
+			}
+		}
+	}
 }
