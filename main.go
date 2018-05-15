@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -63,6 +65,8 @@ func main() {
 		log.Fatalf("Unable to retrieve data from sheet: %v", err)
 	}
 
+	emailTemplate := template.Must(template.ParseFiles("email-template.html"))
+
 	if len(resp.Values) == 0 {
 		fmt.Println("No data found.")
 	} else {
@@ -77,16 +81,28 @@ func main() {
 					data.email, int(timeLeft.Hours()))
 
 				// Send email notification
-				from := mail.NewEmail("SprintHub", "test@nearbuy.ng")
-				to := mail.NewEmail(data.firstName+" "+data.lastName, data.email)
-				subject := "Notification Expiring"
+				from := mail.NewEmail("SprintHub", "noreply@sprinthub.com.ng")
+				to := mail.NewEmail(data.firstName, "jthankgod@ymail.com")
+				subject := "Co-working Space Subscription Expiry"
 				messageText := "Test message"
-				message := mail.NewSingleEmail(from, subject, to, messageText, ".")
-				message.SetMailSettings(&mail.MailSettings{
-					SandboxMode: &mail.Setting{
-						Enable: &enableSandboxMode,
-					},
+				msgBytes := bytes.NewBuffer([]byte{})
+				err := emailTemplate.Execute(msgBytes, struct {
+					FirstName string
+					TimeLeft  string
+				}{
+					data.firstName,
+					string(int(timeLeft.Hours())) + "hours",
 				})
+				if err != nil {
+					log.Printf("Cannot execute HTML template. %+v\n", err)
+					continue
+				}
+				message := mail.NewSingleEmail(from, subject, to, messageText, msgBytes.String())
+				// message.SetMailSettings(&mail.MailSettings{
+				// 	SandboxMode: &mail.Setting{
+				// 		Enable: &enableSandboxMode,
+				// 	},
+				// })
 				response, err := mailClient.Send(message)
 				if err != nil {
 					log.Printf("Message sending failed with error: %+v\n", err)
