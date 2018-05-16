@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
 	"html/template"
 	"io/ioutil"
@@ -12,6 +12,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cloud.google.com/go/datastore"
+	"google.golang.org/api/option"
 
 	"google.golang.org/appengine/log"
 
@@ -42,6 +45,7 @@ var (
 	enableSandboxMode bool
 	sendGridAPIKey    string
 	spreadsheetID     string
+	projectID         string
 	// ErrMissingEnvVar will be raised when required environment variables are missing
 	ErrMissingEnvVar = errors.New("Missing environment variable")
 	srv              *sheets.Service
@@ -132,6 +136,7 @@ func setupSheetsService(next http.HandlerFunc) http.HandlerFunc {
 			if err := setupEnvVars(map[string]*string{
 				"SENDGRID_API_KEY": &sendGridAPIKey,
 				"SPREADSHEET_ID":   &spreadsheetID,
+				"PROJECT_ID":       &projectID,
 			}); err != nil {
 				log.Criticalf(appengine.NewContext(r), err.Error())
 			}
@@ -220,14 +225,14 @@ func newSheetsService(secretsFile string, r *http.Request) *sheets.Service {
 // Retrieve a token, saves the token, then returns the generated client.
 func getClient(config *oauth2.Config, r *http.Request) *http.Client {
 	ctx := appengine.NewContext(r)
-	tokFile := "token.json"
-	tok, err := tokenFromFile(tokFile)
+	key := datastore.NameKey("AuthToken", "SheetsMailerAuthToken", nil)
+	tok, err := tokenFromFile(ctx, key)
 	if err != nil {
 		tok, err = getTokenFromWeb(config)
 		if err != nil {
 			log.Criticalf(ctx, "Unable to retrieve token from web: %+v\n", err)
 		}
-		if err = saveToken(tokFile, tok); err != nil {
+		if err = saveToken(ctx, key, tok); err != nil {
 			log.Criticalf(ctx, "%+v\n", err)
 		}
 	}
@@ -242,37 +247,36 @@ func getTokenFromWeb(config *oauth2.Config) (*oauth2.Token, error) {
 
 	var authCode string
 	if _, err := fmt.Scan(&authCode); err != nil {
-		return nil, errors.WithMessage(err, "Authentication failed")
+		return nil, errors.WithMessage(err, "Scanning for token failed")
 	}
 
 	tok, err := config.Exchange(oauth2.NoContext, authCode)
 	if err != nil {
-		return nil, errors.WithMessage(err, "Authentication failed")
+		return nil, errors.WithMessage(err, "Token exchange failed")
 	}
 	return tok, nil
 }
 
 // Retrieves a token from a local file.
-func tokenFromFile(file string) (*oauth2.Token, error) {
-	f, err := os.Open(file)
-	defer f.Close()
+func tokenFromFile(ctx context.Context, key *datastore.Key) (*oauth2.Token, error) {
+	client, err := datastore.NewClient(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
 	tok := &oauth2.Token{}
-	err = json.NewDecoder(f).Decode(tok)
+	if err = client.Get(ctx, key, tok); err != nil {
+		return nil, err
+	}
 	return tok, err
 }
 
 // Saves a token to a file path.
-func saveToken(path string, token *oauth2.Token) error {
-	fmt.Printf("Saving credential file to: %s\n", path)
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
-	defer f.Close()
+func saveToken(ctx context.Context, key *datastore.Key, token *oauth2.Token) error {
+	client, err := datastore.NewClient(ctx, projectID, option.WithoutAuthentication())
 	if err != nil {
 		return errors.WithMessage(err, "Unable to cache oauth token")
 	}
-	if err = json.NewEncoder(f).Encode(token); err != nil {
+	if _, err = client.Put(ctx, key, token); err != nil {
 		return err
 	}
 	return nil
