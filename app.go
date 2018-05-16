@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"html/template"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"google.golang.org/appengine/log"
 
 	"google.golang.org/appengine"
 
@@ -46,15 +47,11 @@ var (
 	srv              *sheets.Service
 	emailTemplate    *template.Template
 	mailClient       *sendgrid.Client
+	once             sync.Once
 )
 
 func init() {
-	if err := setupEnvVars(map[string]*string{
-		"SENDGRID_API_KEY": &sendGridAPIKey,
-		"SPREADSHEET_ID":   &spreadsheetID,
-	}); err != nil {
-		log.Fatalln(err)
-	}
+
 	// Email template for the message
 	emailTemplate = template.Must(template.ParseFiles("email-template.html"))
 	mailClient = sendgrid.NewSendClient(sendGridAPIKey)
@@ -84,11 +81,12 @@ func cronPingHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errors.New("Missing sheets data").Error(), http.StatusInternalServerError)
 		return
 	}
+	ctx := appengine.NewContext(r)
 	wg := sync.WaitGroup{}
 	for _, row := range resp.Values {
 		d, err := newSheetEntry(row)
 		if err != nil {
-			log.Println(errors.WithMessage(err, "Failed to parse data from spreadsheet."))
+			log.Infof(ctx, errors.WithMessage(err, "Failed to parse data from spreadsheet.").Error())
 			continue
 		}
 		wg.Add(1)
@@ -106,7 +104,7 @@ func cronPingHandler(w http.ResponseWriter, r *http.Request) {
 					TimeLeft:  strconv.Itoa(int(timeLeft.Hours())) + " hours",
 				})
 				if err != nil {
-					log.Println(errors.WithMessage(err, "Cannot execute HTML template."))
+					log.Infof(ctx, errors.WithMessage(err, "Cannot execute HTML template.").Error())
 					return
 				}
 				message := mail.NewSingleEmail(from, messageSubject, to, text, msgBytes.String())
@@ -117,9 +115,9 @@ func cronPingHandler(w http.ResponseWriter, r *http.Request) {
 				})
 				response, err := mailClient.Send(message)
 				if err != nil {
-					log.Println(errors.WithMessage(err, "Message sending failed."))
+					log.Infof(ctx, errors.WithMessage(err, "Message sending failed.").Error())
 				}
-				log.Println(response)
+				log.Infof(ctx, "Response: %v\n", response)
 			}
 			wg.Done()
 		}(d)
@@ -130,12 +128,20 @@ func cronPingHandler(w http.ResponseWriter, r *http.Request) {
 
 func setupSheetsService(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() {
+			if err := setupEnvVars(map[string]*string{
+				"SENDGRID_API_KEY": &sendGridAPIKey,
+				"SPREADSHEET_ID":   &spreadsheetID,
+			}); err != nil {
+				log.Criticalf(appengine.NewContext(r), err.Error())
+			}
+		})
 		if srv != nil {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if srv = newSheetsService("client_secret.json", r); srv != nil {
-			log.Println("Sheets service configuration failed")
+		if srv = newSheetsService("client_secret.json", r); srv == nil {
+			log.Criticalf(appengine.NewContext(r), "Sheets service configuration failed")
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
@@ -188,23 +194,24 @@ func newSheetEntry(data []interface{}) (sheetEntry, error) {
 }
 
 func newSheetsService(secretsFile string, r *http.Request) *sheets.Service {
+	ctx := appengine.NewContext(r)
 	clientSecret, err := ioutil.ReadFile("client_secret.json")
 	if err != nil {
-		log.Printf("Unable to read client secret file: %v", err)
+		log.Criticalf(ctx, "Unable to read client secret file: %v", err)
 		return nil
 	}
 
 	// If modifying these scopes, delete your previously saved client_secret.json.
 	config, err := google.ConfigFromJSON(clientSecret, sheets.SpreadsheetsReadonlyScope)
 	if err != nil {
-		log.Printf("Unable to parse client secret file to config: %v", err)
+		log.Criticalf(ctx, "Unable to parse client secret file to config: %v", err)
 		return nil
 	}
 	client := getClient(config, r)
 
 	srv, err := sheets.New(client)
 	if err != nil {
-		log.Printf("Unable to retrieve Sheets client: %v", err)
+		log.Criticalf(ctx, "Unable to retrieve Sheets client: %v", err)
 		return nil
 	}
 	return srv
@@ -212,31 +219,37 @@ func newSheetsService(secretsFile string, r *http.Request) *sheets.Service {
 
 // Retrieve a token, saves the token, then returns the generated client.
 func getClient(config *oauth2.Config, r *http.Request) *http.Client {
+	ctx := appengine.NewContext(r)
 	tokFile := "token.json"
 	tok, err := tokenFromFile(tokFile)
 	if err != nil {
-		tok = getTokenFromWeb(config)
-		saveToken(tokFile, tok)
+		tok, err = getTokenFromWeb(config)
+		if err != nil {
+			log.Criticalf(ctx, "Unable to retrieve token from web: %+v\n", err)
+		}
+		if err = saveToken(tokFile, tok); err != nil {
+			log.Criticalf(ctx, "%+v\n", err)
+		}
 	}
-	return config.Client(appengine.NewContext(r), tok)
+	return config.Client(ctx, tok)
 }
 
 // Request a token from the web, then returns the retrieved token.
-func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
+func getTokenFromWeb(config *oauth2.Config) (*oauth2.Token, error) {
 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
 	fmt.Printf("Go to the following link in your browser then type the "+
 		"authorization code: \n%v\n", authURL)
 
 	var authCode string
 	if _, err := fmt.Scan(&authCode); err != nil {
-		log.Fatalf("Unable to read authorization code: %v", err)
+		return nil, errors.WithMessage(err, "Authentication failed")
 	}
 
 	tok, err := config.Exchange(oauth2.NoContext, authCode)
 	if err != nil {
-		log.Fatalf("Unable to retrieve token from web: %v", err)
+		return nil, errors.WithMessage(err, "Authentication failed")
 	}
-	return tok
+	return tok, nil
 }
 
 // Retrieves a token from a local file.
@@ -252,14 +265,17 @@ func tokenFromFile(file string) (*oauth2.Token, error) {
 }
 
 // Saves a token to a file path.
-func saveToken(path string, token *oauth2.Token) {
+func saveToken(path string, token *oauth2.Token) error {
 	fmt.Printf("Saving credential file to: %s\n", path)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 	defer f.Close()
 	if err != nil {
-		log.Fatalf("Unable to cache oauth token: %v", err)
+		return errors.WithMessage(err, "Unable to cache oauth token")
 	}
-	json.NewEncoder(f).Encode(token)
+	if err = json.NewEncoder(f).Encode(token); err != nil {
+		return err
+	}
+	return nil
 }
 
 // timeFromSheet converts the time gotten from the spreadsheet to a time.Time value
