@@ -15,6 +15,27 @@
 
 [[projects]]
   branch = "master"
+  name = "github.com/pkg/errors"
+  packages = ["."]
+  revision = "816c9085562cd7ee03e7f8188a1cfd942858cded"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/sendgrid/rest"
+  packages = ["."]
+  revision = "306b9bef57dc36f3435ccfcc08fe6ae2c6920344"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/sendgrid/sendgrid-go"
+  packages = [
+    ".",
+    "helpers/mail"
+  ]
+  revision = "588320a743278a1824a54d232a7e9f36df6f6c99"
+
+[[projects]]
+  branch = "master"
   name = "golang.org/x/net"
   packages = [
     "context",
@@ -58,6 +79,7 @@
     "internal/modules",
     "internal/remote_api",
     "internal/urlfetch",
+    "log",
     "urlfetch"
   ]
   revision = "0a24098c0ec68416ec050f567f75df563d6b231e"
@@ -65,6 +87,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "fb5f5ab7bca751379301d31c76f82e966d40f9b9395cda3124de3cae88c600cf"
+  inputs-digest = "90465ff9027f7bdaf9f369aafcff670fe222ddeff6581f9206837c803eeb2d73"
   solver-name = "gps-cdcl"
   solver-version = 1

@@ -27,7 +27,11 @@
 
 [[constraint]]
   branch = "master"
-  name = "golang.org/x/net"
+  name = "github.com/pkg/errors"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/sendgrid/sendgrid-go"
 
 [[constraint]]
   branch = "master"
@@ -36,6 +40,10 @@
 [[constraint]]
   branch = "master"
   name = "google.golang.org/api"
+
+[[constraint]]
+  branch = "master"
+  name = "google.golang.org/appengine"
 
 [prune]
   go-tests = true
