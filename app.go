@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io/ioutil"
@@ -44,6 +45,7 @@ const (
 var (
 	enableSandboxMode bool
 	sendGridAPIKey    string
+	sheetsAPIToken    string
 	spreadsheetID     string
 	projectID         string
 	// ErrMissingEnvVar will be raised when required environment variables are missing
@@ -137,6 +139,7 @@ func setupSheetsService(next http.HandlerFunc) http.HandlerFunc {
 				"SENDGRID_API_KEY": &sendGridAPIKey,
 				"SPREADSHEET_ID":   &spreadsheetID,
 				"PROJECT_ID":       &projectID,
+				"TOKEN":            &sheetsAPIToken,
 			}); err != nil {
 				log.Criticalf(appengine.NewContext(r), err.Error())
 			}
@@ -226,17 +229,19 @@ func newSheetsService(secretsFile string, r *http.Request) *sheets.Service {
 func getClient(config *oauth2.Config, r *http.Request) *http.Client {
 	ctx := appengine.NewContext(r)
 	key := datastore.NameKey("AuthToken", "SheetsMailerAuthToken", nil)
-	tok, err := tokenFromFile(ctx, key)
+	tok, err := tokenFromFile(ctx, key, "token.json")
 	if err != nil {
 		tok, err = getTokenFromWeb(config)
 		if err != nil {
 			log.Criticalf(ctx, "Unable to retrieve token from web: %+v\n", err)
+			return nil
 		}
 		if err = saveToken(ctx, key, tok); err != nil {
 			log.Criticalf(ctx, "%+v\n", err)
 		}
 	}
-	return config.Client(ctx, tok)
+	client := config.Client(ctx, tok)
+	return client
 }
 
 // Request a token from the web, then returns the retrieved token.
@@ -258,15 +263,27 @@ func getTokenFromWeb(config *oauth2.Config) (*oauth2.Token, error) {
 }
 
 // Retrieves a token from a local file.
-func tokenFromFile(ctx context.Context, key *datastore.Key) (*oauth2.Token, error) {
-	client, err := datastore.NewClient(ctx, projectID)
-	if err != nil {
-		return nil, err
+func tokenFromFile(ctx context.Context, key *datastore.Key, file string) (*oauth2.Token, error) {
+	var (
+		tok = &oauth2.Token{}
+		err error
+	)
+	// Try reading from the environment variable
+	if sheetsAPIToken != "" {
+		err = json.NewDecoder(bytes.NewReader([]byte(sheetsAPIToken))).Decode(tok)
+	} else if f, err := os.Open(file); err == nil {
+		// Try reading the token from file
+		defer f.Close()
+		err = json.NewDecoder(f).Decode(tok)
+	} else {
+		// Try reading from datastore
+		client, err := datastore.NewClient(ctx, projectID)
+		if err != nil {
+			return nil, err
+		}
+		err = client.Get(ctx, key, tok)
 	}
-	tok := &oauth2.Token{}
-	if err = client.Get(ctx, key, tok); err != nil {
-		return nil, err
-	}
+	log.Infof(ctx, "%+v\n", err)
 	return tok, err
 }
 
