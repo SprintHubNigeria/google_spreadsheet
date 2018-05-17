@@ -1,1 +1,1 @@
-web: ./google_spreadsheet
+web: bin/google_spreadsheet
