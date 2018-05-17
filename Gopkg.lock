@@ -8,10 +8,22 @@
   version = "v0.22.0"
 
 [[projects]]
+  name = "github.com/gobuffalo/envy"
+  packages = ["."]
+  revision = "ef60bfc50c8f92d1ee64674d8ce7a48f1f67625e"
+  version = "v1.6.2"
+
+[[projects]]
   branch = "master"
   name = "github.com/golang/protobuf"
   packages = ["proto"]
   revision = "b4deda0973fb4c70b50d226b1af49f3da59f5265"
+
+[[projects]]
+  name = "github.com/joho/godotenv"
+  packages = ["."]
+  revision = "a79fa1e548e2c689c241d10173efd51e5d689d5b"
+  version = "v1.2.0"
 
 [[projects]]
   branch = "master"
@@ -79,7 +91,6 @@
     "internal/modules",
     "internal/remote_api",
     "internal/urlfetch",
-    "log",
     "urlfetch"
   ]
   revision = "0a24098c0ec68416ec050f567f75df563d6b231e"
@@ -87,6 +98,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "90465ff9027f7bdaf9f369aafcff670fe222ddeff6581f9206837c803eeb2d73"
+  inputs-digest = "b46f4e445277d4c9a5446e4d2f140d377498468f2a3c206320b523959b2ebf44"
   solver-name = "gps-cdcl"
   solver-version = 1
