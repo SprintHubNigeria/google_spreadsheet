@@ -48,3 +48,4 @@
 [metadata.heroku]
   go-version = "go1.10"
   ensure = "true"
+  root-package = "github.com/SprintHubNigeria/google_spreadsheet"
