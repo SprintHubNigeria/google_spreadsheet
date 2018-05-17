@@ -41,10 +41,10 @@
   branch = "master"
   name = "google.golang.org/api"
 
-[[constraint]]
-  branch = "master"
-  name = "google.golang.org/appengine"
-
 [prune]
   go-tests = true
   unused-packages = true
+
+[metadata.heroku]
+  go-version = "go1.10"
+  ensure = "true"

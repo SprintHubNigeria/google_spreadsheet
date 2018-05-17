@@ -47,6 +47,7 @@ var (
 	spreadsheetID     string
 	env               string
 	port              string
+	cronHeader        string
 	srv               *sheets.Service
 	emailTemplate     *template.Template
 	mailClient        *sendgrid.Client
@@ -60,6 +61,7 @@ func main() {
 		"CLIENT_SECRET":    &clientSecret,
 		"TOKEN":            &sheetsAPIToken,
 		"PORT":             &port,
+		"CRON_HEADER":      &cronHeader,
 	}); err != nil {
 		log.Fatalf("%+v\n", err)
 	}
@@ -84,6 +86,10 @@ func main() {
 }
 
 func cronPingHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-SPRINTHUB-CRON") == "" || r.Header.Get("X-SPRINTHUB-CRON") != cronHeader {
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+		return
+	}
 	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
