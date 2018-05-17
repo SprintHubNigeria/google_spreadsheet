@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -14,12 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"cloud.google.com/go/datastore"
-	"google.golang.org/api/option"
-
-	"google.golang.org/appengine/log"
-
-	"google.golang.org/appengine"
+	"github.com/gobuffalo/envy"
 
 	"github.com/sendgrid/sendgrid-go/helpers/mail"
 
@@ -40,44 +35,55 @@ const (
 	messageText    = "Your SprintHub co-working space subscription will expire in %s hours. You can contact us to renew your subscription."
 	// Data range to be read from the spreadsheet
 	readRange = "Sheet1!A3:F"
+	// ErrFmtMissingEnvVar will be raised when required environment variables are missing
+	ErrFmtMissingEnvVar = "Missing environment variable %s"
 )
 
 var (
 	enableSandboxMode bool
 	sendGridAPIKey    string
+	clientSecret      string
 	sheetsAPIToken    string
 	spreadsheetID     string
-	projectID         string
-	// ErrMissingEnvVar will be raised when required environment variables are missing
-	ErrMissingEnvVar = errors.New("Missing environment variable")
-	srv              *sheets.Service
-	emailTemplate    *template.Template
-	mailClient       *sendgrid.Client
-	once             sync.Once
+	env               string
+	port              string
+	srv               *sheets.Service
+	emailTemplate     *template.Template
+	mailClient        *sendgrid.Client
 )
 
-func init() {
-
+func main() {
+	if err := setupEnvVars(map[string]*string{
+		"SENDGRID_API_KEY": &sendGridAPIKey,
+		"SPREADSHEET_ID":   &spreadsheetID,
+		"ENV":              &env,
+		"CLIENT_SECRET":    &clientSecret,
+		"TOKEN":            &sheetsAPIToken,
+		"PORT":             &port,
+	}); err != nil {
+		log.Fatalf("%+v\n", err)
+	}
+	if env == "dev" {
+		enableSandboxMode = true
+	}
+	if srv = newSheetsService([]byte(clientSecret)); srv == nil {
+		log.Fatalln("Sheets service configuration failed")
+	}
 	// Email template for the message
 	emailTemplate = template.Must(template.ParseFiles("email-template.html"))
 	mailClient = sendgrid.NewSendClient(sendGridAPIKey)
-	// Register HTTP handler
-	http.HandleFunc("/", setupSheetsService(cronPingHandler))
-	if appengine.IsDevAppServer() {
-		enableSandboxMode = true
+	// Create ServeMux and register HTTP handler
+	server := http.NewServeMux()
+	server.HandleFunc("/", cronPingHandler)
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "localhost"
 	}
-}
-
-func main() {
-	appengine.Main()
+	log.Printf("Listening on %s:%s", hostname, port)
+	log.Fatalf("Server crashed with error: %+v\n", http.ListenAndServe(fmt.Sprintf("%s:%s", hostname, port), server))
 }
 
 func cronPingHandler(w http.ResponseWriter, r *http.Request) {
-	// Check for X-Appengine-Cron header.
-	// if r.Header.Get("X-Appengine-Cron") == "" {
-	// 	http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-	// 	return
-	// }
 	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -87,86 +93,62 @@ func cronPingHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errors.New("Missing sheets data").Error(), http.StatusInternalServerError)
 		return
 	}
-	ctx := appengine.NewContext(r)
 	wg := sync.WaitGroup{}
 	for _, row := range resp.Values {
-		d, err := newSheetEntry(row)
-		if err != nil {
-			log.Infof(ctx, errors.WithMessage(err, "Failed to parse data from spreadsheet.").Error())
-			continue
-		}
 		wg.Add(1)
-		go func(data sheetEntry) {
+		go func(row []interface{}) {
+			data, err := newSheetEntry(row)
+			if err != nil {
+				log.Println(errors.WithMessage(err, "Failed to parse data from spreadsheet."))
+			}
 			// Determine whether there's between 0 and 24 hours left
-			now := time.Now().UTC()
-			if timeLeft := data.endDate.Sub(now); timeLeft.Hours() < 24 {
+			if data.TimeLeft.Hours() < 24 {
 				// Send email notification
-				from := mail.NewEmail(messageSender, fromEmail)
-				to := mail.NewEmail(data.firstName, "jthankgod@ymail.com")
-				text := fmt.Sprintf(messageText, strconv.Itoa(int(timeLeft.Hours())))
-				msgBytes := bytes.NewBuffer([]byte{})
-				err := emailTemplate.Execute(msgBytes, emailData{
-					FirstName: data.firstName,
-					TimeLeft:  strconv.Itoa(int(timeLeft.Hours())) + " hours",
-				})
-				if err != nil {
-					log.Infof(ctx, errors.WithMessage(err, "Cannot execute HTML template.").Error())
-					return
+				if err := sendEmail(data); err != nil {
+					log.Println(err)
 				}
-				message := mail.NewSingleEmail(from, messageSubject, to, text, msgBytes.String())
-				message.SetMailSettings(&mail.MailSettings{
-					SandboxMode: &mail.Setting{
-						Enable: &enableSandboxMode,
-					},
-				})
-				response, err := mailClient.Send(message)
-				if err != nil {
-					log.Infof(ctx, errors.WithMessage(err, "Message sending failed.").Error())
-				}
-				log.Infof(ctx, "Response: %v\n", response)
 			}
 			wg.Done()
-		}(d)
-		wg.Wait()
+		}(row)
 	}
+	wg.Wait()
 	w.WriteHeader(http.StatusOK)
 }
 
-func setupSheetsService(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		once.Do(func() {
-			if err := setupEnvVars(map[string]*string{
-				"SENDGRID_API_KEY": &sendGridAPIKey,
-				"SPREADSHEET_ID":   &spreadsheetID,
-				"PROJECT_ID":       &projectID,
-				"TOKEN":            &sheetsAPIToken,
-			}); err != nil {
-				log.Criticalf(appengine.NewContext(r), err.Error())
-			}
-		})
-		if srv != nil {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if srv = newSheetsService("client_secret.json", r); srv == nil {
-			log.Criticalf(appengine.NewContext(r), "Sheets service configuration failed")
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-			return
-		}
-		next.ServeHTTP(w, r)
+func sendEmail(data sheetEntry) error {
+	from := mail.NewEmail(messageSender, fromEmail)
+	to := mail.NewEmail(data.FirstName, "jthankgod@ymail.com")
+	text := fmt.Sprintf(messageText, strconv.Itoa(int(data.TimeLeft.Hours())))
+	msgBytes := bytes.NewBuffer([]byte{})
+	err := emailTemplate.Execute(msgBytes, struct {
+		FirstName, TimeLeft string
+	}{
+		FirstName: data.FirstName,
+		TimeLeft:  strconv.Itoa(int(data.TimeLeft.Hours())) + " hours",
+	})
+	if err != nil {
+		return errors.WithMessage(err, "Cannot execute HTML template.")
 	}
-}
-
-type emailData struct {
-	FirstName string
-	TimeLeft  string
+	message := mail.NewSingleEmail(from, messageSubject, to, text, msgBytes.String())
+	message.SetMailSettings(&mail.MailSettings{
+		SandboxMode: &mail.Setting{
+			Enable: &enableSandboxMode,
+		},
+	})
+	response, err := mailClient.Send(message)
+	if err != nil {
+		return errors.WithMessage(err, "Message sending failed.")
+	}
+	log.Printf("Response: %v\n", response)
+	return nil
 }
 
 type sheetEntry struct {
-	firstName string
-	lastName  string
-	email     string
-	endDate   time.Time
+	FirstName string
+	LastName  string
+	Email     string
+	EndDate   time.Time
+	TimeLeft  time.Duration
 }
 
 // Parse the data from the spreadsheet and clean them for use
@@ -193,58 +175,52 @@ func newSheetEntry(data []interface{}) (sheetEntry, error) {
 	if err != nil {
 		return sheetEntry{}, errors.WithMessage(err, "Bad time value")
 	}
+	timeLeft := expiryDate.Sub(now)
 	return sheetEntry{
-		email:     email,
-		endDate:   expiryDate,
-		firstName: firstName,
-		lastName:  lastName,
+		Email:     email,
+		EndDate:   expiryDate,
+		FirstName: firstName,
+		LastName:  lastName,
+		TimeLeft:  timeLeft,
 	}, nil
 }
 
-func newSheetsService(secretsFile string, r *http.Request) *sheets.Service {
-	ctx := appengine.NewContext(r)
-	clientSecret, err := ioutil.ReadFile("client_secret.json")
-	if err != nil {
-		log.Criticalf(ctx, "Unable to read client secret file: %v", err)
-		return nil
-	}
-
+func newSheetsService(secret []byte) *sheets.Service {
 	// If modifying these scopes, delete your previously saved client_secret.json.
-	config, err := google.ConfigFromJSON(clientSecret, sheets.SpreadsheetsReadonlyScope)
+	config, err := google.ConfigFromJSON(secret, sheets.SpreadsheetsReadonlyScope)
 	if err != nil {
-		log.Criticalf(ctx, "Unable to parse client secret file to config: %v", err)
+		log.Printf("Unable to parse client secret file to config: %v", err)
 		return nil
 	}
-	client := getClient(config, r)
+	client := getClient(config)
 
 	srv, err := sheets.New(client)
 	if err != nil {
-		log.Criticalf(ctx, "Unable to retrieve Sheets client: %v", err)
+		log.Printf("Unable to retrieve Sheets client: %v", err)
 		return nil
 	}
 	return srv
 }
 
 // Retrieve a token, saves the token, then returns the generated client.
-func getClient(config *oauth2.Config, r *http.Request) *http.Client {
-	ctx := appengine.NewContext(r)
-	key := datastore.NameKey("AuthToken", "SheetsMailerAuthToken", nil)
-	tok, err := tokenFromFile(ctx, key, "token.json")
+func getClient(config *oauth2.Config) *http.Client {
+	ctx := context.Background()
+	tok, err := tokenFromEnvOrFile("token.json")
 	if err != nil {
 		tok, err = getTokenFromWeb(config)
 		if err != nil {
-			log.Criticalf(ctx, "Unable to retrieve token from web: %+v\n", err)
+			log.Printf("Unable to retrieve token from web: %+v\n", err)
 			return nil
 		}
-		if err = saveToken(ctx, key, tok); err != nil {
-			log.Criticalf(ctx, "%+v\n", err)
+		if err = saveToken("token.json", tok); err != nil {
+			log.Printf("%+v\n", err)
 		}
 	}
 	client := config.Client(ctx, tok)
 	return client
 }
 
-// Request a token from the web, then returns the retrieved token.
+// Request a token from the web, then return the retrieved token.
 func getTokenFromWeb(config *oauth2.Config) (*oauth2.Token, error) {
 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
 	fmt.Printf("Go to the following link in your browser then type the "+
@@ -262,8 +238,8 @@ func getTokenFromWeb(config *oauth2.Config) (*oauth2.Token, error) {
 	return tok, nil
 }
 
-// Retrieves a token from a local file.
-func tokenFromFile(ctx context.Context, key *datastore.Key, file string) (*oauth2.Token, error) {
+// Retrieves a token from a local file. It first checks the "TOKEN" environment variable for the token.
+func tokenFromEnvOrFile(file string) (*oauth2.Token, error) {
 	var (
 		tok = &oauth2.Token{}
 		err error
@@ -275,25 +251,18 @@ func tokenFromFile(ctx context.Context, key *datastore.Key, file string) (*oauth
 		// Try reading the token from file
 		defer f.Close()
 		err = json.NewDecoder(f).Decode(tok)
-	} else {
-		// Try reading from datastore
-		client, err := datastore.NewClient(ctx, projectID)
-		if err != nil {
-			return nil, err
-		}
-		err = client.Get(ctx, key, tok)
 	}
-	log.Infof(ctx, "%+v\n", err)
+	log.Printf("%+v\n", err)
 	return tok, err
 }
 
 // Saves a token to a file path.
-func saveToken(ctx context.Context, key *datastore.Key, token *oauth2.Token) error {
-	client, err := datastore.NewClient(ctx, projectID, option.WithoutAuthentication())
+func saveToken(tokenFilePath string, token *oauth2.Token) error {
+	f, err := os.Create(tokenFilePath)
 	if err != nil {
-		return errors.WithMessage(err, "Unable to cache oauth token")
+		return errors.WithMessage(err, "Unable to create file "+tokenFilePath)
 	}
-	if _, err = client.Put(ctx, key, token); err != nil {
+	if err = json.NewEncoder(f).Encode(token); err != nil {
 		return err
 	}
 	return nil
@@ -322,10 +291,11 @@ func timeFromSheet(date string, now time.Time) (time.Time, error) {
 
 func setupEnvVars(vars map[string]*string) error {
 	for envVar, dest := range vars {
-		*dest = os.Getenv(envVar)
-		if *dest == "" {
-			return ErrMissingEnvVar
+		val, err := envy.MustGet(envVar)
+		if err != nil {
+			return errors.Errorf(ErrFmtMissingEnvVar, envVar)
 		}
+		*dest = val
 	}
 	return nil
 }
