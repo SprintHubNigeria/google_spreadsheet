@@ -11,10 +11,9 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
-	"time"
 
+	"github.com/SprintHubNigeria/google_spreadsheet/pkg/model/sheetdata"
 	"github.com/gobuffalo/envy"
 
 	"github.com/sendgrid/sendgrid-go/helpers/mail"
@@ -26,7 +25,6 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/sheets/v4"
-	"math"
 )
 
 const (
@@ -34,7 +32,7 @@ const (
 	messageSender  = "SprintHub"
 	fromEmail      = "noreply@sprinthub.com.ng"
 	messageSubject = "Co-working Space Subscription Expiry"
-	messageText    = "Your SprintHub co-working space subscription will expire in %s hours. You can contact us to renew your subscription."
+	messageText    = "Your SprintHub co-working space subscription will expire in %s days. You can contact us to renew your subscription."
 	// Data range to be read from the spreadsheet
 	readRange = "Hub List!A3:F"
 	// ErrFmtMissingEnvVar will be raised when required environment variables are missing
@@ -53,6 +51,7 @@ var (
 	srv               *sheets.Service
 	emailTemplate     *template.Template
 	mailClient        *sendgrid.Client
+	tokenFile         string = "token.json"
 )
 
 func main() {
@@ -106,17 +105,19 @@ func cronPingHandler(w http.ResponseWriter, r *http.Request) {
 	for _, row := range resp.Values {
 		wg.Add(1)
 		go func(row []interface{}) {
-			data, err := newSheetEntry(row)
+			data, err := sheetdata.NewSheetEntry(row)
 			if err != nil {
 				log.Println(errors.WithMessage(err, "Failed to parse data from spreadsheet."))
 			}
 			// Determine whether there's between 0 and 24 hours left
-			if data.TimeLeft.Hours() <= 24 {
+			if shouldSendEmail(data.DaysLeft()) {
 				// Send email notification
 				if err := sendEmail(data); err != nil {
 					log.Printf("%+v\n%+v\n", err, data)
 				}
-				log.Printf("Sent email to %s at %s\n", data.fullName(), data.Email)
+				log.Printf("Sent email to %s at %s\n", data.FullName(), data.Email)
+			} else {
+				log.Printf("Not sending email to %s:\n\tDays left: %d\n", data.Email, data.DaysLeft())
 			}
 			wg.Done()
 		}(row)
@@ -125,20 +126,20 @@ func cronPingHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func sendEmail(data sheetEntry) error {
+func sendEmail(data sheetdata.SheetEntry) error {
 	from := mail.NewEmail(messageSender, fromEmail)
 	to := mail.NewEmail(data.FirstName, "jthankgod@ymail.com")
-	text := fmt.Sprintf(messageText, strconv.Itoa(int(data.TimeLeft.Hours())))
+	text := fmt.Sprintf(messageText, strconv.Itoa(data.DaysLeft()))
 	msgBytes := bytes.NewBuffer([]byte{})
-	timeLeft := strconv.Itoa(int(data.TimeLeft.Hours())) + " hour"
-	if int(math.Abs(data.TimeLeft.Hours())) > 1 {
-		timeLeft = timeLeft + "s"
+	daysLeft := strconv.Itoa(data.DaysLeft()) + " day"
+	if data.DaysLeft() > 1 {
+		daysLeft = daysLeft + "s"
 	}
 	err := emailTemplate.Execute(msgBytes, struct {
 		FirstName, TimeLeft string
 	}{
 		FirstName: data.FirstName,
-		TimeLeft:  timeLeft,
+		TimeLeft:  daysLeft,
 	})
 	if err != nil {
 		return errors.WithMessage(err, "Cannot execute HTML template.")
@@ -157,50 +158,11 @@ func sendEmail(data sheetEntry) error {
 	return nil
 }
 
-type sheetEntry struct {
-	FirstName string
-	LastName  string
-	Email     string
-	EndDate   time.Time
-	TimeLeft  time.Duration
-}
-
-func (s sheetEntry) fullName() string {
-	return s.FirstName + " " + s.LastName
-}
-
-// Parse the data from the spreadsheet and clean them for use
-func newSheetEntry(data []interface{}) (sheetEntry, error) {
-	// Parse the time from the response
-	firstName, ok := data[0].(string)
-	if !ok {
-		return sheetEntry{}, errors.New("Unexpected first name value")
+func shouldSendEmail(daysToExpiry int) bool {
+	if daysToExpiry == 1 || daysToExpiry == 3 || daysToExpiry == 7 {
+		return true
 	}
-	lastName, ok := data[1].(string)
-	if !ok {
-		return sheetEntry{}, errors.New("Unexpected last name value")
-	}
-	date, ok := data[5].(string)
-	if !ok {
-		return sheetEntry{}, errors.New("Unexpected date value")
-	}
-	email, ok := data[3].(string)
-	if !ok {
-		return sheetEntry{}, errors.New("Unexpected email value")
-	}
-	now := time.Now().UTC()
-	expiryDate, err := timeFromSheet(date, now)
-	if err != nil {
-		return sheetEntry{}, errors.WithMessage(err, "Bad time value")
-	}
-	timeLeft := expiryDate.Sub(now)
-	return sheetEntry{
-		Email:     email,
-		EndDate:   expiryDate,
-		FirstName: firstName,
-		LastName:  lastName,
-		TimeLeft:  timeLeft,
-	}, nil
+	return false
 }
 
 func newSheetsService(secret []byte) *sheets.Service {
@@ -224,7 +186,7 @@ func newSheetsService(secret []byte) *sheets.Service {
 
 // Retrieve a token, saves the token, then returns the generated client.
 func getClient(config *oauth2.Config) *http.Client {
-	tok, err := tokenFromEnvOrFile("token.json")
+	tok, err := tokenFromEnvOrFile(tokenFile)
 	if err != nil {
 		tok, err = getTokenFromWeb(config)
 		if err != nil {
@@ -286,27 +248,6 @@ func saveToken(tokenFilePath string, token *oauth2.Token) error {
 		return err
 	}
 	return nil
-}
-
-// timeFromSheet converts the time gotten from the spreadsheet to a time.Time value
-// If there is a problem during the conversion, it returns a time.Time value with the default zero values
-// and an error. If the conversion succeeds, it returns the converted time and no error.
-func timeFromSheet(date string, now time.Time) (time.Time, error) {
-	expires := strings.Split(date, "/")
-	y, err := strconv.Atoi("20" + expires[2])
-	if err != nil {
-		return time.Time{}, err
-	}
-	mInt, err := strconv.Atoi(expires[1])
-	if err != nil {
-		return time.Time{}, err
-	}
-	m := time.Month(mInt)
-	d, err := strconv.Atoi(expires[0])
-	if err != nil {
-		return time.Time{}, err
-	}
-	return time.Date(y, m, d, 0, 0, 0, 0, now.Location()).UTC(), nil
 }
 
 func setupEnvVars(vars map[string]*string) error {

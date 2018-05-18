@@ -113,3 +113,6 @@ modules.xml
 
 client_secret.json
 token.json
+.env
+# The application binary
+cmd/app/app
