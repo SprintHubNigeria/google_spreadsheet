@@ -1,3 +1,3 @@
 #!/bin/bash
 
-curl -H "X-SPRINTHUB-CRON: $CRON_HEADER" https://sprinthub-spreadsheet-mailer.herokuapp.com
+curl -H "X-SPRINTHUB-CRON: $CRON_HEADER" https://hub-sprint.herokuapp.com

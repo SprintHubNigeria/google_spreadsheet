@@ -1,2 +1,2 @@
-web: bin/google_spreadsheet
+web: app
 clock: bash $(pwd)/clock.sh

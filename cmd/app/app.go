@@ -128,7 +128,7 @@ func cronPingHandler(w http.ResponseWriter, r *http.Request) {
 
 func sendEmail(data sheetdata.SheetEntry) error {
 	from := mail.NewEmail(messageSender, fromEmail)
-	to := mail.NewEmail(data.FirstName, "jthankgod@ymail.com")
+	to := mail.NewEmail(data.FirstName, data.Email)
 	text := fmt.Sprintf(messageText, strconv.Itoa(data.DaysLeft()))
 	msgBytes := bytes.NewBuffer([]byte{})
 	daysLeft := strconv.Itoa(data.DaysLeft()) + " day"
