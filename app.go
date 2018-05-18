@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/sheets/v4"
+	"math"
 )
 
 const (
@@ -34,7 +36,7 @@ const (
 	messageSubject = "Co-working Space Subscription Expiry"
 	messageText    = "Your SprintHub co-working space subscription will expire in %s hours. You can contact us to renew your subscription."
 	// Data range to be read from the spreadsheet
-	readRange = "Sheet1!A3:F"
+	readRange = "Hub List!A3:F"
 	// ErrFmtMissingEnvVar will be raised when required environment variables are missing
 	ErrFmtMissingEnvVar = "Missing environment variable %s"
 )
@@ -93,7 +95,7 @@ func cronPingHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
 	if err != nil {
-		http.Error(w, err.Error()+"\non line 95\n", http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if len(resp.Values) == 0 {
@@ -109,11 +111,12 @@ func cronPingHandler(w http.ResponseWriter, r *http.Request) {
 				log.Println(errors.WithMessage(err, "Failed to parse data from spreadsheet."))
 			}
 			// Determine whether there's between 0 and 24 hours left
-			if data.TimeLeft.Hours() < 24 {
+			if data.TimeLeft.Hours() <= 24 {
 				// Send email notification
 				if err := sendEmail(data); err != nil {
-					log.Println(err)
+					log.Printf("%+v\n%+v\n", err, data)
 				}
+				log.Printf("Sent email to %s at %s\n", data.fullName(), data.Email)
 			}
 			wg.Done()
 		}(row)
@@ -127,11 +130,15 @@ func sendEmail(data sheetEntry) error {
 	to := mail.NewEmail(data.FirstName, "jthankgod@ymail.com")
 	text := fmt.Sprintf(messageText, strconv.Itoa(int(data.TimeLeft.Hours())))
 	msgBytes := bytes.NewBuffer([]byte{})
+	timeLeft := strconv.Itoa(int(data.TimeLeft.Hours())) + " hour"
+	if int(math.Abs(data.TimeLeft.Hours())) > 1 {
+		timeLeft = timeLeft + "s"
+	}
 	err := emailTemplate.Execute(msgBytes, struct {
 		FirstName, TimeLeft string
 	}{
 		FirstName: data.FirstName,
-		TimeLeft:  strconv.Itoa(int(data.TimeLeft.Hours())) + " hours",
+		TimeLeft:  timeLeft,
 	})
 	if err != nil {
 		return errors.WithMessage(err, "Cannot execute HTML template.")
@@ -142,11 +149,11 @@ func sendEmail(data sheetEntry) error {
 			Enable: &enableSandboxMode,
 		},
 	})
-	response, err := mailClient.Send(message)
+	_, err = mailClient.Send(message)
 	if err != nil {
 		return errors.WithMessage(err, "Message sending failed.")
 	}
-	log.Printf("Response: %v\n", response)
+	//log.Printf("Response: %v\n", response)
 	return nil
 }
 
@@ -156,6 +163,10 @@ type sheetEntry struct {
 	Email     string
 	EndDate   time.Time
 	TimeLeft  time.Duration
+}
+
+func (s sheetEntry) fullName() string {
+	return s.FirstName + " " + s.LastName
 }
 
 // Parse the data from the spreadsheet and clean them for use
@@ -254,12 +265,14 @@ func tokenFromEnvOrFile(file string) (*oauth2.Token, error) {
 	// Try reading from the environment variable
 	if sheetsAPIToken != "" {
 		err = json.NewDecoder(bytes.NewReader([]byte(sheetsAPIToken))).Decode(tok)
-	} else if f, err := os.Open(file); err == nil {
-		// Try reading the token from file
-		defer f.Close()
-		err = json.NewDecoder(f).Decode(tok)
+	} else {
+		f, err := ioutil.ReadFile(file)
+		if err != nil {
+			return nil, err
+		}
+		buf := bytes.NewReader(f)
+		err = json.NewDecoder(buf).Decode(tok)
 	}
-	log.Printf("%+v\n", err)
 	return tok, err
 }
 
