@@ -59,16 +59,17 @@ func main() {
 		"SPREADSHEET_ID":   &spreadsheetID,
 		"ENV":              &env,
 		"CLIENT_SECRET":    &clientSecret,
-		"TOKEN":            &sheetsAPIToken,
 		"PORT":             &port,
 		"CRON_HEADER":      &cronHeader,
 	}); err != nil {
 		log.Fatalf("%+v\n", err)
 	}
+	sheetsAPIToken = envy.Get("TOKEN", "")
 	if env == "dev" {
 		enableSandboxMode = true
 	}
-	if srv = newSheetsService([]byte(clientSecret)); srv == nil {
+	srv = newSheetsService([]byte(clientSecret))
+	if srv == nil {
 		log.Fatalln("Sheets service configuration failed")
 	}
 	// Email template for the message
@@ -86,13 +87,13 @@ func main() {
 }
 
 func cronPingHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("X-SPRINTHUB-CRON") == "" || r.Header.Get("X-SPRINTHUB-CRON") != cronHeader {
+	if r.Header.Get("X-SPRINTHUB-CRON") != cronHeader {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
 	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error()+"\non line 95\n", http.StatusInternalServerError)
 		return
 	}
 	if len(resp.Values) == 0 {
@@ -199,7 +200,9 @@ func newSheetsService(secret []byte) *sheets.Service {
 		return nil
 	}
 	client := getClient(config)
-
+	if client == nil {
+		return nil
+	}
 	srv, err := sheets.New(client)
 	if err != nil {
 		log.Printf("Unable to retrieve Sheets client: %v", err)
@@ -210,7 +213,6 @@ func newSheetsService(secret []byte) *sheets.Service {
 
 // Retrieve a token, saves the token, then returns the generated client.
 func getClient(config *oauth2.Config) *http.Client {
-	ctx := context.Background()
 	tok, err := tokenFromEnvOrFile("token.json")
 	if err != nil {
 		tok, err = getTokenFromWeb(config)
@@ -222,8 +224,7 @@ func getClient(config *oauth2.Config) *http.Client {
 			log.Printf("%+v\n", err)
 		}
 	}
-	client := config.Client(ctx, tok)
-	return client
+	return config.Client(context.Background(), tok)
 }
 
 // Request a token from the web, then return the retrieved token.
