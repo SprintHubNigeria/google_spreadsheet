@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -34,7 +35,7 @@ const (
 	messageSubject = "Co-working Space Subscription Expiry"
 	messageText    = "Your SprintHub co-working space subscription will expire in %s hours. You can contact us to renew your subscription."
 	// Data range to be read from the spreadsheet
-	readRange = "Sheet1!A3:F"
+	readRange = "Hub List!A3:F"
 	// ErrFmtMissingEnvVar will be raised when required environment variables are missing
 	ErrFmtMissingEnvVar = "Missing environment variable %s"
 )
@@ -253,12 +254,14 @@ func tokenFromEnvOrFile(file string) (*oauth2.Token, error) {
 	// Try reading from the environment variable
 	if sheetsAPIToken != "" {
 		err = json.NewDecoder(bytes.NewReader([]byte(sheetsAPIToken))).Decode(tok)
-	} else if f, err := os.Open(file); err == nil {
-		// Try reading the token from file
-		defer f.Close()
-		err = json.NewDecoder(f).Decode(tok)
+	} else {
+		f, err := ioutil.ReadFile(file)
+		if err != nil {
+			return nil, err
+		}
+		buf := bytes.NewReader(f)
+		err = json.NewDecoder(buf).Decode(tok)
 	}
-	log.Printf("%+v\n", err)
 	return tok, err
 }
 
