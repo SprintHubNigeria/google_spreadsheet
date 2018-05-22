@@ -114,10 +114,12 @@ func cronPingHandler(w http.ResponseWriter, r *http.Request) {
 				// Send email notification
 				if err := sendEmail(data); err != nil {
 					log.Printf("%+v\n%+v\n", err, data)
+					wg.Done()
+					return
 				}
 				log.Printf("Sent email to %s at %s\n", data.FullName(), data.Email)
 			} else {
-				log.Printf("Not sending email to %s:\n\tDays left: %d\n", data.Email, data.DaysLeft())
+				log.Printf("Not sending email to %s. Days left: %d\n", data.Email, data.DaysLeft())
 			}
 			wg.Done()
 		}(row)
