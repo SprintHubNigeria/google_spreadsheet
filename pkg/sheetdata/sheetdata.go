@@ -38,13 +38,13 @@ func NewSheetEntry(data []interface{}) (SheetEntry, error) {
 	if !ok {
 		return SheetEntry{}, errors.New("Unexpected last name value")
 	}
-	date, ok := data[5].(string)
+	date, ok := data[4].(string)
 	if !ok {
 		return SheetEntry{}, errors.New("Unexpected date value")
 	}
 	email, ok := data[3].(string)
-	if !ok {
-		return SheetEntry{}, errors.New("Unexpected email value")
+	if !ok || email == "" {
+		return SheetEntry{}, errors.New("Unexpected email value " + email)
 	}
 	now := time.Now().UTC()
 	expiryDate, err := TimeFromSheet(date, now)
