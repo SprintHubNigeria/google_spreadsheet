@@ -1,0 +1,20 @@
+version: '3'
+
+services: 
+  sheetmailer:
+    build: .
+    expose:
+      - "8080"
+    env_file: ".env"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile-nginx
+    ports:
+      - "8081:80"
+    depends_on: 
+      - sheetmailer
+    links:
+      - sheetmailer
+    
