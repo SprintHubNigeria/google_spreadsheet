@@ -1,0 +1,7 @@
+FROM alpine:latest
+
+RUN apk update && apk add curl
+
+COPY crontasks /etc/crontabs/root
+
+CMD ["crond", "-f", "-d", "15"]

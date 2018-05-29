@@ -1,0 +1,2 @@
+# min hour day month dow
+* * * * * curl -H "X-SPRINTHUB-CRON: $CRON_HEADER" web
