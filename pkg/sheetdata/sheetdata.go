@@ -1,6 +1,7 @@
 package sheetdata
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -46,8 +47,7 @@ func NewSheetEntry(data []interface{}) (SheetEntry, error) {
 	if !ok || email == "" {
 		return SheetEntry{}, errors.New("Unexpected email value " + email)
 	}
-	now := time.Now().UTC()
-	expiryDate, err := TimeFromSheet(date, now)
+	expiryDate, err := TimeFromSheet(date)
 	if err != nil {
 		return SheetEntry{}, errors.WithMessage(err, "Bad time value")
 	}
@@ -59,23 +59,60 @@ func NewSheetEntry(data []interface{}) (SheetEntry, error) {
 	}, nil
 }
 
+type date struct {
+	year, month, day int
+}
+
 // TimeFromSheet converts the time gotten from the spreadsheet to a time.Time value
 // If there is a problem during the conversion, it returns a time.Time value with the default zero values
 // and an error. If the conversion succeeds, it returns the converted time and no error.
-func TimeFromSheet(date string, now time.Time) (time.Time, error) {
-	expires := strings.Split(date, "/")
-	y, err := strconv.Atoi("20" + expires[2])
+func TimeFromSheet(date string) (time.Time, error) {
+	dt, err := formatDateFromSheet(date)
 	if err != nil {
 		return time.Time{}, err
 	}
-	mInt, err := strconv.Atoi(expires[1])
+	loc, err := time.LoadLocation("")
 	if err != nil {
 		return time.Time{}, err
 	}
-	m := time.Month(mInt)
-	d, err := strconv.Atoi(expires[0])
-	if err != nil {
-		return time.Time{}, err
+	return time.Date(dt.year, time.Month(dt.month), dt.day, 0, 0, 0, 0, loc).UTC(), nil
+}
+
+var errMalformedDate = fmt.Errorf("malformed date format: date should be in either YYYY-MM-DD or DD/MM/YY formats")
+
+func formatDateFromSheet(dateString string) (date, error) {
+	var (
+		parsedDate = date{}
+		d, m, y    int
+		err        error
+	)
+	dateString = strings.Trim(dateString, " ")
+	if strings.Index(dateString, "-") != -1 {
+		if strings.Index(dateString, "-") < 4 {
+			return parsedDate, errMalformedDate
+		}
+		dateString = strings.Replace(dateString, "-", "", -1)
+		if _, err = fmt.Sscanf(dateString, "%4d%2d%2d", &y, &m, &d); err == nil {
+			parsedDate.year = y
+			parsedDate.month = m
+			parsedDate.day = d
+			return parsedDate, nil
+		}
+	} else if strings.Index(dateString, "/") != -1 {
+		if strings.Index(dateString, "/") < 1 {
+			return parsedDate, errMalformedDate
+		}
+		dateString = strings.Replace(dateString, "/", "", -1)
+		if _, err = fmt.Sscanf(dateString, "%2d%2d%2d", &d, &m, &y); err == nil {
+			y, err = strconv.Atoi("20" + strconv.Itoa(y))
+			if err != nil {
+				return parsedDate, errMalformedDate
+			}
+			parsedDate.year = y
+			parsedDate.month = m
+			parsedDate.day = d
+			return parsedDate, nil
+		}
 	}
-	return time.Date(y, m, d, 0, 0, 0, 0, now.Location()).UTC(), nil
+	return parsedDate, errMalformedDate
 }

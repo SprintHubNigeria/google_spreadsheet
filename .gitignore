@@ -60,5 +60,7 @@ modules.xml
 client_secret.json
 token.json
 .env
+.env-cron
+.env-prod
 # The application binary
 cmd/app/app
